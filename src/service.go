@@ -17,6 +17,7 @@ var (
 	sesamAPI          string
 	sesamJWT          string
 	sparqlEndpoint    string
+	graph             string
 	port              string
 	namespaceMappings map[string]string
 )
@@ -27,6 +28,7 @@ func loadConfig() {
 
 	sesamAPI = os.Getenv("SESAM_API")
 	sesamJWT = os.Getenv("SESAM_JWT")
+	graph = os.Getenv("GRAPH")
 
 	port = os.Getenv("SERVICE_PORT")
 	if port == "" {
@@ -148,6 +150,10 @@ func main() {
 		var deleteSparql strings.Builder
 		var insertSparql strings.Builder
 		var whereSparql strings.Builder
+
+		if graph != "" {
+			deleteSparql.WriteString("WITH <" + graph + "> \n")
+		}
 
 		deleteSparql.WriteString("DELETE { ?subject ?p ?o } \n")
 		insertSparql.WriteString("\nINSERT { \n")
