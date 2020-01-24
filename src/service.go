@@ -14,10 +14,11 @@ import (
 )
 
 var (
+	debugLevel        string
 	sesamAPI          string
 	sesamJWT          string
 	sparqlEndpoint    string
-	graph             string
+	graphBase         string
 	port              string
 	namespaceMappings map[string]string
 )
@@ -28,12 +29,14 @@ func loadConfig() {
 
 	sesamAPI = os.Getenv("SESAM_API")
 	sesamJWT = os.Getenv("SESAM_JWT")
-	graph = os.Getenv("GRAPH")
+	graphBase = os.Getenv("GRAPH_BASE")
 
 	port = os.Getenv("SERVICE_PORT")
 	if port == "" {
 		port = "5000"
 	}
+
+	debugLevel = os.Getenv("DEBUG_LEVEL")
 
 	sparqlEndpoint = os.Getenv("SPARQL_ENDPOINT")
 
@@ -75,7 +78,7 @@ func postSparqlUpdate(update *string) {
 
 	var resp, err = client.Do(req)
 	if err != nil {
-		log.Println("Error in sparql update request")
+		log.Println("Error in sparql update request: " + err.Error())
 		return
 	}
 
@@ -123,7 +126,6 @@ func expandCURI(curi string) string {
 		suffix := nsstrings[1]
 		expansion := namespaceMappings[prefix]
 		uri := expansion + suffix
-		log.Println("expansion : " + uri)
 		return uri
 	}
 
@@ -141,9 +143,10 @@ func main() {
 
 	r := gin.Default()
 
-	r.POST("/entities", func(c *gin.Context) {
+	r.POST("/:graph/entities", func(c *gin.Context) {
 		log.Println("Process Entities")
 		// get body
+		graph := c.Param("graph")
 		data, _ := c.GetRawData()
 		jsonParsed, _ := gabs.ParseJSON(data)
 
@@ -151,9 +154,7 @@ func main() {
 		var insertSparql strings.Builder
 		var whereSparql strings.Builder
 
-		if graph != "" {
-			deleteSparql.WriteString("WITH <" + graph + "> \n")
-		}
+		deleteSparql.WriteString("WITH <" + graphBase + graph + "> \n")
 
 		deleteSparql.WriteString("DELETE { ?subject ?p ?o } \n")
 		insertSparql.WriteString("\nINSERT { \n")
@@ -162,13 +163,19 @@ func main() {
 		// Iterate objects in array
 		for _, e := range jsonParsed.Children() {
 			entity := e.Data().(map[string]interface{})
-			log.Println(entity)
+			// log.Println(entity)
 
 			// expand _id with namespace expansion
 			eidURI := expandCURI(entity["_id"].(string))
 			whereSparql.WriteString("<")
 			whereSparql.WriteString(eidURI)
 			whereSparql.WriteString(">\n")
+
+			if val, ok := entity["_deleted"]; ok {
+				if val.(bool) == true {
+					continue
+				}
+			}
 
 			for k, i := range entity {
 				if strings.HasPrefix(k, "_") {
@@ -196,14 +203,13 @@ func main() {
 				case string:
 					// check if its datatyped
 					if strings.HasPrefix(v, "~:") {
-						log.Printf("encoded true")
 						objURI := expandCURI(v[2:])
 						insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> <" + objURI + "> . \n")
 					} else {
 						insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v + "\" . \n")
 					}
 				default:
-					log.Printf("Unknown type %T!\n", v)
+					// log.Printf("Unknown type %T!\n", v)
 				}
 			}
 		}
