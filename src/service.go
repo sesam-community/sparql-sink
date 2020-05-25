@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	gabs "github.com/Jeffail/gabs/v2"
 	gin "github.com/gin-gonic/gin"
 	"io/ioutil"
@@ -67,8 +69,23 @@ func getJSON(path string) ([]byte, error) {
 	return bodyBytes, nil
 }
 
+// checks if the dataset has been modified today
+func isDatasetModified(dataset string) (bool, error) {
+	// get json for dataset
+	jsonData, _ := getJSON("/datasets/" + dataset)
+	jsonParsed, _ := gabs.ParseJSON(jsonData)
+	modifiedOn := jsonParsed.Path("runtime.last-modified").String()[1:11]
+
+	current := time.Now()
+	ctimeStr := current.Format("2006-01-02")
+
+	changed := (ctimeStr == modifiedOn)
+	return changed, nil
+}
+
 func postSparqlUpdate(update *string) {
 	log.Println("start post update")
+	// log.Println(*update)
 	var url = sparqlEndpoint
 	var client = &http.Client{
 		Timeout: time.Second * 10,
@@ -133,6 +150,139 @@ func expandCURI(curi string) string {
 	return "http://example.org/1"
 }
 
+func convertSingleObject(obj map[string]interface{}) string {
+	for _, i := range obj {
+		switch v := i.(type) {
+		case int:
+			log.Println("int")
+		case string:
+			log.Println("string " + v)
+			if strings.HasPrefix(v, "~t") {
+				ts := v[2:]
+				log.Println(ts)
+			}
+		case float64:
+			// var s string = strconv.FormatFloat(v, )
+			// s := fmt.Sprintf("%f", int(v.(float64)))
+			if v == float64(int64(v)) {
+				i := int(v)
+				s := strconv.Itoa(i)
+				log.Println(s)
+			} else {
+				s := fmt.Sprintf("%f", v)
+				log.Println(s)
+			}
+		case []interface{}:
+			for _, ai := range v {
+				switch v := ai.(type) {
+				case int:
+					log.Println("int")
+				case string:
+					log.Println("string " + v)
+				default:
+					log.Println("unknown list type")
+				}
+			}
+		default:
+			log.Printf("Unknown type %T!\n", v)
+		}
+	}
+	return ""
+}
+
+func buildSparqlAdd(graph string, entities []*map[string]interface{}) string {
+	var insertSparql strings.Builder
+
+	insertSparql.WriteString("\nINSERT DATA { GRAPH <" + graphBase + graph + "> { \n")
+
+	numentities := fmt.Sprintf("number of entities to convert to sparql : %v", len(entities))
+	log.Println(numentities)
+	// Iterate objects in array
+	for _, entity := range entities {
+		// expand _id with namespace expansion
+		eidURI := expandCURI((*entity)["_id"].(string))
+
+		if val, ok := (*entity)["_deleted"]; ok {
+			if val.(bool) == true {
+				continue
+			}
+		}
+
+		for k, i := range *entity {
+			if strings.HasPrefix(k, "_") {
+				continue
+			}
+
+			if strings.HasPrefix(k, "$ids") {
+				// process list and add sameas refs
+				// todo.
+				continue
+			}
+
+			// log.Printf("key[%s] value[%s]\n", k, i)
+			// expand predicate
+			predicate := expandCURI(k)
+			if predicate == "" {
+				log.Println("No namespace on key : " + k)
+				continue
+			}
+
+			switch v := i.(type) {
+			case float64:
+				if v == float64(int64(v)) {
+					insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + strconv.Itoa(int(v)) + "\"^^<http://www.w3.org/2001/XMLSchema#integer> . \n")
+				} else {
+					s := fmt.Sprintf("%f", v)
+					insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + s + "\"^^<http://www.w3.org/2001/XMLSchema#float> . \n")
+				}
+			case int:
+				insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + strconv.Itoa(v) + "\"^^<http://www.w3.org/2001/XMLSchema#integer> . \n")
+			case string:
+				// check if its datatyped
+				if strings.HasPrefix(v, "~:") {
+					objURI := expandCURI(v[2:])
+					insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> <" + objURI + "> . \n")
+				} else if strings.HasPrefix(v, "~t") {
+					insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v[2:] + "\"^^<http://www.w3.org/2001/XMLSchema#dateTime> . \n")
+				} else {
+					insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v + "\" . \n")
+				}
+			case []interface{}:
+				for _, ai := range v {
+					switch v := ai.(type) {
+					case string:
+						if strings.HasPrefix(v, "~:") {
+							objURI := expandCURI(v[2:])
+							insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> <" + objURI + "> . \n")
+						} else if strings.HasPrefix(v, "~t") {
+							insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v[2:] + "\"^^<http://www.w3.org/2001/XMLSchema#dateTime> . \n")
+						} else {
+							insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v + "\" . \n")
+						}
+					case float64:
+						if v == float64(int64(v)) {
+							insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + strconv.Itoa(int(v)) + "\"^^<http://www.w3.org/2001/XMLSchema#integer> . \n")
+						} else {
+							s := fmt.Sprintf("%f", v)
+							insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + s + "\"^^<http://www.w3.org/2001/XMLSchema#float> . \n")
+						}
+					default:
+						log.Println("unknown list type")
+					}
+				}
+			default:
+				// log.Printf("Unknown type %T!\n", v)
+			}
+		}
+	}
+
+	// close sparql sections
+	insertSparql.WriteString(" } }\n")
+
+	body := insertSparql.String()
+	return body
+}
+
 func main() {
 	log.Println("Starting SPARQL Sink")
 	loadConfig()
@@ -143,7 +293,84 @@ func main() {
 
 	r := gin.Default()
 
-	r.POST("/:graph/entities", func(c *gin.Context) {
+	r.POST("snapshot/:graph/:dataset", func(c *gin.Context) {
+		log.Println("Publish Snapshot")
+
+		graph := c.Param("graph")
+		dataset := c.Param("dataset")
+		current := time.Now()
+		gtime := current.Format("2006-01-02")
+		graph = graph + "-" + gtime
+
+		modified, _ := isDatasetModified(dataset)
+
+		if !modified {
+			log.Println("Dataset has not changed so not snapshop is written. Dataset is " + dataset)
+			c.Status(http.StatusOK)
+			return
+		}
+
+		var url = sesamAPI + "datasets/" + dataset + "/entities"
+		var client = &http.Client{
+			Timeout: time.Second * 360,
+		}
+
+		var req, _ = http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "Bearer "+sesamJWT)
+
+		var resp, _ = client.Do(req)
+		defer resp.Body.Close()
+
+		dec := json.NewDecoder(resp.Body)
+
+		// read open bracket
+		_, err := dec.Token()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		var batchSize = 100
+		var entities []*map[string]interface{}
+		var count = 0
+
+		var m *map[string]interface{}
+
+		// while the array contains values
+		for dec.More() {
+			m = new(map[string]interface{})
+			err := dec.Decode(m)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			entities = append(entities, m)
+			count++
+
+			if count == batchSize {
+				var sparql = buildSparqlAdd(graph, entities)
+				log.Println("sparql update : " + sparql)
+				postSparqlUpdate(&sparql)
+				entities = make([]*map[string]interface{}, 0)
+				count = 0
+			}
+		}
+
+		// read closing bracket
+		_, err = dec.Token()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if count > 0 {
+			var sparql = buildSparqlAdd(graph, entities)
+			log.Println("sparql update : " + sparql)
+			postSparqlUpdate(&sparql)
+		}
+
+		c.Status(http.StatusOK)
+	})
+
+	r.POST("store/:graph/entities", func(c *gin.Context) {
 		log.Println("Process Entities")
 		// get body
 		graph := c.Param("graph")
@@ -155,10 +382,10 @@ func main() {
 		var whereSparql strings.Builder
 
 		deleteSparql.WriteString("WITH <" + graphBase + graph + "> \n")
-
 		deleteSparql.WriteString("DELETE { ?subject ?p ?o } \n")
-		insertSparql.WriteString("\nINSERT { \n")
 		whereSparql.WriteString("\nWHERE { \n VALUES ?subject { \n")
+
+		insertSparql.WriteString("\nINSERT DATA { GRAPH <" + graphBase + graph + "> { \n")
 
 		// Iterate objects in array
 		for _, e := range jsonParsed.Children() {
@@ -198,15 +425,46 @@ func main() {
 
 				switch v := i.(type) {
 				case int:
-					// ^^<http://www.w3.org/2001/XMLSchema#integer>
 					insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + strconv.Itoa(v) + "\"^^<http://www.w3.org/2001/XMLSchema#integer> . \n")
+				case float64:
+					if v == float64(int64(v)) {
+						insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + strconv.Itoa(int(v)) + "\"^^<http://www.w3.org/2001/XMLSchema#integer> . \n")
+					} else {
+						s := fmt.Sprintf("%f", v)
+						insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + s + "\"^^<http://www.w3.org/2001/XMLSchema#float> . \n")
+					}
 				case string:
 					// check if its datatyped
 					if strings.HasPrefix(v, "~:") {
 						objURI := expandCURI(v[2:])
 						insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> <" + objURI + "> . \n")
+					} else if strings.HasPrefix(v, "~t") {
+						insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v[2:] + "\"^^<http://www.w3.org/2001/XMLSchema#dateTime> . \n")
 					} else {
 						insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v + "\" . \n")
+					}
+				case []interface{}:
+					for _, ai := range v {
+						switch v := ai.(type) {
+						case string:
+							if strings.HasPrefix(v, "~:") {
+								objURI := expandCURI(v[2:])
+								insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> <" + objURI + "> . \n")
+							} else if strings.HasPrefix(v, "~t") {
+								insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v[2:] + "\"^^<http://www.w3.org/2001/XMLSchema#dateTime> . \n")
+							} else {
+								insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + v + "\" . \n")
+							}
+						case float64:
+							if v == float64(int64(v)) {
+								insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + strconv.Itoa(int(v)) + "\"^^<http://www.w3.org/2001/XMLSchema#integer> . \n")
+							} else {
+								s := fmt.Sprintf("%f", v)
+								insertSparql.WriteString(" <" + eidURI + "> <" + predicate + "> \"" + s + "\"^^<http://www.w3.org/2001/XMLSchema#float> . \n")
+							}
+						default:
+							log.Println("unknown list type")
+						}
 					}
 				default:
 					// log.Printf("Unknown type %T!\n", v)
@@ -215,11 +473,11 @@ func main() {
 		}
 
 		// close sparql sections
-		insertSparql.WriteString("} \n")
-		whereSparql.WriteString("} \n }")
+		insertSparql.WriteString("} }\n")
+		whereSparql.WriteString(" \n } \n ?subject ?p ?o  }; \n ")
 
 		// execute POST to sparql endpoint
-		body := deleteSparql.String() + insertSparql.String() + whereSparql.String()
+		body := deleteSparql.String() + whereSparql.String() + insertSparql.String()
 		postSparqlUpdate(&body)
 
 		c.Status(http.StatusOK)
